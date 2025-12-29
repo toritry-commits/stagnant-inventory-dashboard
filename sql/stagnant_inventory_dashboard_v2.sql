@@ -840,31 +840,27 @@ stock_book_value AS (
 sku_book_value_summary AS (
   SELECT
     sac.sku_hash,
-    -- 期末1減損予定の簿価（商品＋余りパーツ）
+    -- 期末1減損予定の簿価（商品＋余りパーツ）- 在庫個別カテゴリで集計
     SUM(CASE
-      WHEN (sac.is_assembled AND pwc.product_category = 'term1')
-        OR (NOT sac.is_assembled AND sac.category = 'term1')
+      WHEN sac.category = 'term1'
       THEN IFNULL(bv1.book_value_closing, 0)
       ELSE 0
     END) AS term1_book_value,
-    -- 期末2減損予定の簿価（商品＋余りパーツ）
+    -- 期末2減損予定の簿価（商品＋余りパーツ）- 在庫個別カテゴリで集計
     SUM(CASE
-      WHEN (sac.is_assembled AND pwc.product_category = 'term2')
-        OR (NOT sac.is_assembled AND sac.category = 'term2')
+      WHEN sac.category = 'term2'
       THEN IFNULL(bv2.book_value_closing, 0)
       ELSE 0
     END) AS term2_book_value,
-    -- 期末3減損予定の簿価（商品＋余りパーツ）
+    -- 期末3減損予定の簿価（商品＋余りパーツ）- 在庫個別カテゴリで集計
     SUM(CASE
-      WHEN (sac.is_assembled AND pwc.product_category = 'term3')
-        OR (NOT sac.is_assembled AND sac.category = 'term3')
+      WHEN sac.category = 'term3'
       THEN IFNULL(bv3.book_value_closing, 0)
       ELSE 0
     END) AS term3_book_value,
-    -- 期末4以降減損予定の簿価（商品＋余りパーツ）
+    -- 期末4以降減損予定の簿価（商品＋余りパーツ）- 在庫個別カテゴリで集計
     SUM(CASE
-      WHEN (sac.is_assembled AND pwc.product_category = 'term4_after')
-        OR (NOT sac.is_assembled AND sac.category = 'term4_after')
+      WHEN sac.category = 'term4_after'
       THEN IFNULL(bv4.book_value_closing, 0)
       ELSE 0
     END) AS term4_book_value,
