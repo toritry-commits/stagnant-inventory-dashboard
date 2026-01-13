@@ -153,6 +153,77 @@ monthly_stock_valuation_v2
 
 ---
 
+## 参照テーブル詳細 (stock_info.sql)
+
+`sql/reference/stock_info.sql` が参照しているテーブルの一覧です。
+
+### lake層 (19テーブル)
+
+| テーブル名 | 用途 |
+|-----------|------|
+| `lake.stock` | 在庫マスタ (メインテーブル) |
+| `lake.part` | 部品/商品マスタ |
+| `lake.supplier` | 仕入先マスタ |
+| `lake.location` | ロケーション |
+| `lake.warehouse` | 倉庫マスタ |
+| `lake.lent` | C向け貸出 |
+| `lake.lent_detail` | C向け貸出明細 |
+| `lake.lent_to_b` | B向け貸出 |
+| `lake.lent_to_b_detail` | B向け貸出明細 |
+| `lake.proposition` | 提案/案件 |
+| `lake.contract` | 契約 |
+| `lake.contract_destination` | 契約送付先 |
+| `lake.client` | クライアント |
+| `lake.purchasing` | 仕入 |
+| `lake.purchasing_detail` | 仕入明細 |
+| `lake.purchasing_detail_stock` | 仕入明細-在庫紐付け |
+| `lake.external_sale_stock` | 外部販売在庫 |
+| `lake.external_sale_product` | 外部販売商品 |
+| `lake.stock_acquisition_costs` | 在庫取得原価 |
+
+### mart層 (1テーブル)
+
+| テーブル名 | 用途 |
+|-----------|------|
+| `mart.stock_report` | 在庫レポート (カテゴリ情報取得用) |
+
+### 依存関係図
+
+```
+stock_info.sql
+    |
+    +-- lake.stock (中心)
+    |       |-- lake.part
+    |       |-- lake.supplier
+    |       |-- lake.location --> lake.warehouse
+    |       +-- lake.stock_acquisition_costs
+    |
+    +-- 貸出系 (C向け)
+    |       |-- lake.lent
+    |       +-- lake.lent_detail
+    |
+    +-- 貸出系 (B向け)
+    |       |-- lake.lent_to_b
+    |       |-- lake.lent_to_b_detail
+    |       |-- lake.contract_destination
+    |       |-- lake.contract
+    |       |-- lake.proposition
+    |       +-- lake.client
+    |
+    +-- 仕入系
+    |       |-- lake.purchasing
+    |       |-- lake.purchasing_detail
+    |       +-- lake.purchasing_detail_stock
+    |
+    +-- 外部販売系
+    |       |-- lake.external_sale_stock
+    |       +-- lake.external_sale_product
+    |
+    +-- mart.stock_report (カテゴリ情報)
+```
+
+---
+
 ## 今後の対応
 
 1. **mart.monthly_stock_valuation のスケジュール調整**
