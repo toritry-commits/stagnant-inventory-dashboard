@@ -16,6 +16,24 @@
 -- 作成日: 2025-12-26
 -- 更新日: 2026-01-14
 --
+-- ★売却データ上書き機能★:
+--   sandbox.sold_override_202512 テーブルのデータでBigQuery未反映分を上書き
+--   - impossibled_at: CSVの除売却日を優先
+--   - classification_of_impossibility: CSVにあれば SoldToBusiness (法人売却)
+--   - sold_proposition_name: CSVの売却案件名を優先
+--
+-- ★コストデータ上書き機能★:
+--   sandbox.cost_override_202512 テーブルのデータでBigQuery未反映分を上書き
+--   - actual_cost: CSVの取得原価(acquisition_costs)を優先
+--   - monthly_depreciation: 上書きされた取得原価から再計算
+--
+-- ★SMTPFリースバック上書き機能★:
+--   sandbox.smtpf_override_202512 テーブルのデータでBigQuery未反映分を上書き
+--   - supplier_name: サプライヤーIDからサプライヤー名を取得して上書き
+--   - contract_code: 上書きされたサプライヤー名から契約開始コードを抽出
+--   - actual_cost: smtpf > cost_override > 元データの優先順位で上書き
+--   - monthly_depreciation: 上書きされた取得原価から再計算
+--
 -- 出力カラム:
 --   - 期首/期末の計算基準日
 --   - 在庫の識別情報・マスタ情報
@@ -307,6 +325,44 @@ WITH monthly_periods AS (
 ),
 
 -- ============================================================================
+-- CTE: 売却上書きデータ (sandbox.sold_override_202512 から)
+-- BigQueryに未反映の法人売却データを上書きするための一時テーブル
+-- ============================================================================
+sold_override AS (
+  SELECT
+    stock_id,
+    impossibled_at,
+    sold_proposition_name
+  FROM `clas-analytics.sandbox.sold_override_202512`
+),
+
+-- ============================================================================
+-- CTE: コスト上書きデータ (sandbox.cost_override_202512 から)
+-- BigQueryに未反映のコストデータを上書きするための一時テーブル
+-- ============================================================================
+cost_override AS (
+  SELECT
+    id AS stock_id,
+    acquisition_costs
+  FROM `clas-analytics.sandbox.cost_override_202512`
+),
+
+-- ============================================================================
+-- CTE: SMTPFリースバック上書きデータ (sandbox.smtpf_override_202512 から)
+-- 三井住友トラスト・パナソニックファイナンスのリースバック品
+-- サプライヤーIDとコストを上書き（リース再取得日の計算に影響）
+-- ============================================================================
+smtpf_override AS (
+  SELECT
+    so.stock_id,
+    so.cost,
+    so.supplier_id,
+    sup.name AS supplier_name
+  FROM `clas-analytics.sandbox.smtpf_override_202512` so
+  LEFT JOIN `clas-analytics.lake.supplier` sup ON so.supplier_id = sup.id
+),
+
+-- ============================================================================
 -- CTE: C向け初回出荷日・リース開始日の計算 (lake.lent, lake.lent_detail から)
 -- ============================================================================
 lent_info AS (
@@ -394,11 +450,17 @@ base_stock_data AS (
     s.id AS stock_id,
     s.part_id,
     p.name AS part_name,
-    sup.name AS supplier_name,
+    -- ★上書き★: smtpf_overrideのサプライヤー名を優先（リース再取得日計算に影響）
+    COALESCE(smtpf.supplier_name, sup.name) AS supplier_name,
     s.sample,
-    s.classification_of_impossibility,
+    -- ★上書き★: sold_overrideにデータがあれば法人売却(SoldToBusiness)として扱う
+    CASE
+      WHEN so.stock_id IS NOT NULL THEN 'SoldToBusiness'
+      ELSE s.classification_of_impossibility
+    END AS classification_of_impossibility,
     s.inspected_at,
-    s.impossibled_at,
+    -- ★上書き★: sold_overrideの除売却日を優先
+    COALESCE(so.impossibled_at, s.impossibled_at) AS impossibled_at,
     s.impairment_date,
     -- リース開始日: B向けリース開始日を使用
     to_b_info.lease_start_at AS lease_start_at_raw,
@@ -410,20 +472,27 @@ base_stock_data AS (
     END AS first_shipped_at_base,
     -- 耐用年数: パーツマスタから取得
     COALESCE(p.depreciation_period, 0) AS depreciation_period,
-    -- 取得原価 = 仕入原価 + 諸経費 - 値引
-    COALESCE(s.cost, 0) + COALESCE(sac.overhead_cost, 0) - COALESCE(sac.discount, 0) AS actual_cost,
-    -- 月次償却額 = 取得原価 / (耐用年数 × 12) の切り上げ
+    -- ★上書き★: smtpf_override > cost_override > 元データの順で取得原価を優先
+    COALESCE(
+      smtpf.cost,
+      co.acquisition_costs,
+      COALESCE(s.cost, 0) + COALESCE(sac.overhead_cost, 0) - COALESCE(sac.discount, 0)
+    ) AS actual_cost,
+    -- ★上書き★: 月次償却額も上書きされた取得原価から再計算
     CASE
       WHEN COALESCE(p.depreciation_period, 0) = 0 THEN 0
       ELSE CEILING(
-        (COALESCE(s.cost, 0) + COALESCE(sac.overhead_cost, 0) - COALESCE(sac.discount, 0))
-        / (p.depreciation_period * 12)
+        COALESCE(
+          smtpf.cost,
+          co.acquisition_costs,
+          COALESCE(s.cost, 0) + COALESCE(sac.overhead_cost, 0) - COALESCE(sac.discount, 0)
+        ) / (p.depreciation_period * 12)
       )
     END AS monthly_depreciation,
-    -- サプライヤー名から契約開始コードを抽出
-    REGEXP_EXTRACT(sup.name, r'_契約開始(\d{4})$') AS contract_code,
-    -- 売却案件名
-    sp.sold_proposition_name,
+    -- ★上書き★: サプライヤー名から契約開始コードを抽出（smtpf_overrideを優先）
+    REGEXP_EXTRACT(COALESCE(smtpf.supplier_name, sup.name), r'_契約開始(\d{4})$') AS contract_code,
+    -- ★上書き★: sold_overrideの売却案件名を優先
+    COALESCE(so.sold_proposition_name, sp.sold_proposition_name) AS sold_proposition_name,
     -- リース案件名
     lp.lease_proposition_name
 
@@ -442,6 +511,12 @@ base_stock_data AS (
   LEFT JOIN to_b_info ON s.id = to_b_info.stock_id
   LEFT JOIN sold_proposition sp ON s.id = sp.stock_id
   LEFT JOIN lease_proposition lp ON s.id = lp.stock_id
+  -- ★追加★: 売却上書きデータをJOIN
+  LEFT JOIN sold_override so ON s.id = so.stock_id
+  -- ★追加★: コスト上書きデータをJOIN
+  LEFT JOIN cost_override co ON s.id = co.stock_id
+  -- ★追加★: SMTPFリースバック上書きデータをJOIN
+  LEFT JOIN smtpf_override smtpf ON s.id = smtpf.stock_id
   WHERE s.deleted_at IS NULL
 ),
 
