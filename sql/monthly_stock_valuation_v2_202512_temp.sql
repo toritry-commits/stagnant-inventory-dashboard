@@ -24,7 +24,7 @@
 --
 -- ★コストデータ上書き機能★:
 --   sandbox.cost_override_202512 テーブルのデータでBigQuery未反映分を上書き
---   - actual_cost: CSVの取得原価(acquisition_costs)を優先
+--   - actual_cost: cost + overhead_cost - discount で計算
 --   - monthly_depreciation: 上書きされた取得原価から再計算
 --
 -- ★SMTPFリースバック上書き機能★:
@@ -343,7 +343,10 @@ sold_override AS (
 cost_override AS (
   SELECT
     id AS stock_id,
-    acquisition_costs
+    cost,
+    -- overhead_cost, discountはSTRING型のためINT64にキャスト
+    SAFE_CAST(overhead_cost AS INT64) AS overhead_cost,
+    SAFE_CAST(discount AS INT64) AS discount
   FROM `clas-analytics.sandbox.cost_override_202512`
 ),
 
@@ -360,6 +363,29 @@ smtpf_override AS (
     sup.name AS supplier_name
   FROM `clas-analytics.sandbox.smtpf_override_202512` so
   LEFT JOIN `clas-analytics.lake.supplier` sup ON so.supplier_id = sup.id
+),
+
+-- ============================================================================
+-- CTE: 棚卸資産振替日 (外部販売の承認日)
+-- external_sale_stock, external_sale_product から取得
+-- ============================================================================
+inventory_transfer AS (
+  SELECT
+    ess.stock_id,
+    CASE
+      WHEN esp.status IN ('Sellable', 'Soldout') THEN
+        CASE
+          WHEN DATE(esp.created_at) = DATE(2025, 3, 24) THEN esp.created_at
+          WHEN DATE(esp.created_at) = DATE(2025, 4, 8) THEN esp.created_at
+          ELSE esp.authorized_at
+        END
+      ELSE NULL
+    END AS inventory_transfer_date
+  FROM `clas-analytics.lake.external_sale_stock` ess
+  INNER JOIN `clas-analytics.lake.external_sale_product` esp
+    ON ess.external_sale_product_id = esp.id
+  WHERE ess.deleted_at IS NULL
+    AND esp.deleted_at IS NULL
 ),
 
 -- ============================================================================
@@ -473,20 +499,20 @@ base_stock_data AS (
     -- 耐用年数: パーツマスタから取得
     COALESCE(p.depreciation_period, 0) AS depreciation_period,
     -- ★上書き★: smtpf_override > cost_override > 元データの順で取得原価を優先
-    COALESCE(
-      smtpf.cost,
-      co.acquisition_costs,
-      COALESCE(s.cost, 0) + COALESCE(sac.overhead_cost, 0) - COALESCE(sac.discount, 0)
-    ) AS actual_cost,
+    CASE
+      WHEN smtpf.cost IS NOT NULL THEN smtpf.cost
+      WHEN co.stock_id IS NOT NULL THEN COALESCE(co.cost, 0) + COALESCE(co.overhead_cost, 0) - COALESCE(co.discount, 0)
+      ELSE COALESCE(s.cost, 0) + COALESCE(sac.overhead_cost, 0) - COALESCE(sac.discount, 0)
+    END AS actual_cost,
     -- ★上書き★: 月次償却額も上書きされた取得原価から再計算
     CASE
       WHEN COALESCE(p.depreciation_period, 0) = 0 THEN 0
       ELSE CEILING(
-        COALESCE(
-          smtpf.cost,
-          co.acquisition_costs,
-          COALESCE(s.cost, 0) + COALESCE(sac.overhead_cost, 0) - COALESCE(sac.discount, 0)
-        ) / (p.depreciation_period * 12)
+        CASE
+          WHEN smtpf.cost IS NOT NULL THEN smtpf.cost
+          WHEN co.stock_id IS NOT NULL THEN COALESCE(co.cost, 0) + COALESCE(co.overhead_cost, 0) - COALESCE(co.discount, 0)
+          ELSE COALESCE(s.cost, 0) + COALESCE(sac.overhead_cost, 0) - COALESCE(sac.discount, 0)
+        END / (p.depreciation_period * 12)
       )
     END AS monthly_depreciation,
     -- ★上書き★: サプライヤー名から契約開始コードを抽出（smtpf_overrideを優先）
@@ -494,7 +520,9 @@ base_stock_data AS (
     -- ★上書き★: sold_overrideの売却案件名を優先
     COALESCE(so.sold_proposition_name, sp.sold_proposition_name) AS sold_proposition_name,
     -- リース案件名
-    lp.lease_proposition_name
+    lp.lease_proposition_name,
+    -- 棚卸資産振替日 (外部販売の承認日)
+    it.inventory_transfer_date
 
   FROM `clas-analytics.lake.stock` s
   LEFT JOIN `clas-analytics.lake.part` p ON s.part_id = p.id
@@ -517,6 +545,8 @@ base_stock_data AS (
   LEFT JOIN cost_override co ON s.id = co.stock_id
   -- ★追加★: SMTPFリースバック上書きデータをJOIN
   LEFT JOIN smtpf_override smtpf ON s.id = smtpf.stock_id
+  -- ★追加★: 棚卸資産振替日をJOIN
+  LEFT JOIN inventory_transfer it ON s.id = it.stock_id
   WHERE s.deleted_at IS NULL
 ),
 
@@ -827,6 +857,8 @@ SELECT
   accum_depr_closing,
   impairment_closing,
   calc_book_value(acquisition_cost_closing, accum_depr_closing, impairment_closing, is_reveshare_flag) AS book_value_closing,
+  -- 棚卸資産振替日 (Inventory Transfer Date)
+  inventory_transfer_date,
   -- 累計値（8項目）- 任意期間計算用 (Cumulative - for flexible period calculation)
   cumulative_acquisition_cost_increase,
   cumulative_acquisition_cost_decrease,

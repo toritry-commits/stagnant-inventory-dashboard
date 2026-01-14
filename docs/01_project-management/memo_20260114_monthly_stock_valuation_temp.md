@@ -24,7 +24,7 @@
 | テーブル名 | 用途 | カラム |
 |-----------|------|--------|
 | `sold_override_202512` | 法人売却の上書き | stock_id, impossibled_at, sold_proposition_name |
-| `cost_override_202512` | 取得原価の上書き | id(=stock_id), acquisition_costs |
+| `cost_override_202512` | 取得原価の上書き | id(=stock_id), cost, overhead_cost, discount |
 | `smtpf_override_202512` | SMTPFリースバック品の上書き | stock_id, cost, supplier_id |
 
 ### CSVデータ保存先
@@ -48,8 +48,10 @@ CSVにある売却データでBigQuery未反映分を上書き。
 
 | 項目 | 処理 |
 |------|------|
-| `actual_cost` | CSVの取得原価(acquisition_costs)を優先 |
+| `actual_cost` | `cost + overhead_cost - discount` で計算 |
 | `monthly_depreciation` | 上書きされた取得原価から再計算 |
+
+**注意:** `overhead_cost` と `discount` はSTRING型のため、クエリ内で `SAFE_CAST` でINT64に変換している
 
 ### 3. SMTPFリースバック上書き (smtpf_override_202512)
 
@@ -75,7 +77,7 @@ CSVにある売却データでBigQuery未反映分を上書き。
 取得原価の上書きには優先順位がある:
 
 ```
-smtpf_override.cost > cost_override.acquisition_costs > 元データ
+smtpf_override.cost > cost_override(cost + overhead_cost - discount) > 元データ
 ```
 
 競合チェック済み: `smtpf_override_202512` と `cost_override_202512` に同じstock_idは存在しない
@@ -94,3 +96,30 @@ smtpf_override.cost > cost_override.acquisition_costs > 元データ
 - このクエリは臨時用。本番の `monthly_stock_valuation_v2.sql` には影響しない
 - sandboxの一時テーブルは不要になったら削除すること
 - CSVアップロード時は文字コードに注意(UTF-8推奨)
+
+---
+
+## 棚卸資産振替日 (inventory_transfer_date)
+
+外部販売の承認日を棚卸資産振替日として出力に追加。
+
+### データソース
+- `lake.external_sale_stock` と `lake.external_sale_product` をJOIN
+
+### 取得ロジック
+
+```sql
+CASE
+  WHEN esp.status IN ('Sellable', 'Soldout') THEN
+    CASE
+      WHEN DATE(esp.created_at) = DATE(2025, 3, 24) THEN esp.created_at
+      WHEN DATE(esp.created_at) = DATE(2025, 4, 8) THEN esp.created_at
+      ELSE esp.authorized_at
+    END
+  ELSE NULL
+END
+```
+
+### データ検証結果
+- 全データ数: **863件** (2025/3/24 - 2026/1/8)
+- 2025年12月: **120件**
